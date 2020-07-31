@@ -7,31 +7,33 @@ description:
 name: GlusterFS Cluster Replication Logic
 
 globals:
-  storage_nodes: ${settings.storage_nodes:storage}
-  storage_master_node: ${settings.storage_master_node:[nodes.storage.master.id]}
+  storage_nodes_id: ${settings.storage_nodes_id:storage}
+  storage_master_node_id: ${settings.storage_master_node_id:[nodes.storage.master.id]}
   replicatedPath: ${settings.replicatedPath:/data}
                                                                                                                                                                               
-onInstall:        
-  initiateGlusterFSCluster
+onInstall:
+  - script: |
+      return { result : 0, onAfterReturn: { setGlobals: { storage_nodes_array: "${globals.storage_nodes_id}".split(",") } }};
+  - initiateGlusterFSCluster
 
 onAfterStart:
-  - cmd[${globals.storage_nodes}]: mount -a; exportfs -ra;
+  - cmd[storage]: mount -a; exportfs -ra;
 
-onAfterServiceScaleOut[${globals.storage_nodes}]:                                                                                                                                                                                                 
+onAfterServiceScaleOut[storage]:                                                                                                                                                                                                 
   - forEach(newnode:event.response.nodes):                                                                                                                                                                                       
       - addBrickToVolume:                                                                                                                                                                                                          
           address: ${@newnode.address}                                                                                                                                                                                             
           id: ${@newnode.id}
                                                                                                                                                                                                                                  
-onBeforeScaleIn[${globals.storage_nodes}]:                                                                                                                                             
+onBeforeScaleIn[storage]:                                                                                                                                             
   - forEach(removednode:event.response.nodes):                                                                                                                                                                                   
       removeBrickFromVolume:                                                                                                                                                                                                     
         address: ${@removednode.address}     
                                                                                                                                                                                                                                  
-onAfterRedeployContainer[${globals.storage_nodes}]:                                                                                                                                                                                                    
-  - cmd[${globals.storage_nodes}]: /bin/systemctl start glusterd.service && /bin/systemctl enable glusterd.service;
+onAfterRedeployContainer[storage]:                                                                                                                                                                                                    
+  - cmd[storage]: /bin/systemctl start glusterd.service && /bin/systemctl enable glusterd.service;
   - cmd[${nodes.storage.master.id}]: gluster volume start jelastic force; gluster volume set jelastic network.ping-timeout 3;
-  - forEach(clusternode:${globals.storage_nodes}):                                                                                                                                                                                          
+  - forEach(clusternode:nodes.storage):                                                                                                                                                                                          
       - mountDirectoryToVolume:                                                                                                                                                                                                    
           id: ${@clusternode.id}                                                                                                                                                                                                   
           address: ${@clusternode.address}                                                                                                                                                                                   
@@ -48,16 +50,16 @@ onAfterClone:
       replicatedPath: {globals.replicatedPath}
       
 onBeforeMigrate:
-  - cmd[${globals.storage_nodes}]: umount -l ${globals.replicatedPath} || true; sed -i '/glusterfs/d' /etc/fstab; rm -rf ${globals.replicatedPath}
+  - cmd[storage]: umount -l ${globals.replicatedPath} || true; sed -i '/glusterfs/d' /etc/fstab; rm -rf ${globals.replicatedPath}
   
 onAfterMigrate:
   initiateGlusterFSCluster
 
 actions:
   initiateGlusterFSCluster:
-    - cmd[${globals.storage_nodes}]: umount ${globals.replicatedPath} || true;
+    - cmd[${globals.storage_nodes_id}]: umount ${globals.replicatedPath} || true;
     - environment.file.read: 
-        nodeId: ${nodes.storage.master.id}
+        nodeId: ${globals.storage_master_node_id}
         path: /etc/exports
         user: root
     - environment.file.write:
@@ -65,25 +67,31 @@ actions:
         path: /etc/exports
         user: root
         body: ${response.body}
-    - forEach(clusternode:${globals.storage_nodes}):                                                                                                                                                                                          
-        cleanupNode:                                                                                                                                                                                                           
-          id: ${@clusternode.id}     
-    - forEach(clusternode:globals.storage_nodes}'):                                                                                                                                                                                          
-        enableGlusterFS:                                                                                                                                                                                                           
-          id: ${@clusternode.id}                                                                                                                                                                                                   
+    - forEach(clusternode:${globals.storage_nodes_array}):
+      - env.control.GetNodeInfo:
+        nodeId: ${@clusternode}
+      - cleanupNode:                                                                                                                                                                                                           
+          id: ${response.softNode.id}
+    - forEach(clusternode:${globals.storage_nodes_array}):
+      - env.control.GetNodeInfo:
+        nodeId: ${@clusternode}
+      - enableGlusterFS:                                                                                                                                                                                                           
+          id: ${response.softNode.id}                                                                                                                                                                                                   
     - prepareVolumeBricks                                                                                                                                                                                                          
     - initiateVolume                                                                                                                                                                                                             
-    - forEach(clusternode:${globals.nodes}):                                                                                                                                                                                          
+    - forEach(clusternode:${globals.storage_nodes_array}):
+        - env.control.GetNodeInfo:
+          nodeId: ${@clusternode}
         - mountDirectoryToVolume:                                                                                                                                                                                                    
-            id: ${@clusternode.id}                                                                                                                                                                                                   
-            address: ${@clusternode.address}                                                                                                                                                                                      
+            id: ${response.softNode.id}                                                                                                                                                                                                  
+            address: ${response.softNode.address}                                                                                                                                                                                      
         - addAutoMount:                                                                                                                                                                                                    
-            id: ${@clusternode.id}                                                                                                                                                                                                   
-            address: ${@clusternode.address}
+            id: ${response.softNode.id}                                                                                                                                                                                                  
+            address: ${response.softNode.address}                                                                                                                                                                                      
         - fixExistingMounts:                                                                                                                                                                                                    
-            id: ${@clusternode.id}  
+            id: ${response.softNode.id}                                                                                                                                                                                                  
         - checkStatus:                                                                                                                                                                                                    
-            id: ${@clusternode.id}  
+            id: ${response.softNode.id}                                                                                                                                                                                                  
         
   cleanupNode:                                                                                                                                                                                                              
     - cmd[${this.id}]: |-
@@ -99,18 +107,20 @@ actions:
       user: root
   
   addPeer:
-    - cmd[${nodes.storage.master.id}]: gluster peer probe ${this.address} && sleep 1;
+    - cmd[${globals.storage_master_node_id}]: gluster peer probe ${this.address} && sleep 1;
                                                                                                                                                                                                                                  
   prepareVolumeBricks:                                                                                                                                                                                                                                                                                                                                                                                                 
-    forEach(clusternode:nodes.storage):                                                                                                                                                                                          
-      if (${@clusternode.id} != ${nodes.storage.master.id}):                                                                                                                                                                     
+    forEach(clusternode:${globals.storage_nodes_array}):                                                                                                                                                                                          
+      - env.control.GetNodeInfo:
+        nodeId: ${@clusternode}
+      - if (${response.softNode.id} != ${globals.storage_master_node_id}):                                                                                                                                                                     
         addPeer:
-            address: ${@clusternode.address}
+            address: ${response.softNode.address}
           
   initiateVolume:
-    - cmd[${nodes.storage.master.id}]: |-
+    - cmd[${globals.storage_master_node_id}]: |-
         let "NUMBER_OF_BRICKS=$(gluster peer status |grep 'Number of Peers'|awk '{print $4}') + 1"; 
-        BRICKS_ADDRESSES=$(gluster peer status|grep Hostname| awk '{print $2}'); BRICKS_STRING="${nodes.storage.master.address}:/glustervolume"; 
+        BRICKS_ADDRESSES=$(gluster peer status|grep Hostname| awk '{print $2}'); BRICKS_STRING="${globals.storage_master_node_address}:/glustervolume"; 
         for i in ${BRICKS_ADDRESSES}; do BRICKS_STRING="${BRICKS_STRING} ${i}:/glustervolume"; done; 
         gluster volume create jelastic replica ${NUMBER_OF_BRICKS} transport tcp ${BRICKS_STRING} force; gluster volume start jelastic; gluster volume set jelastic network.ping-timeout 3;
       user: root
@@ -126,7 +136,7 @@ actions:
       user: root
       
   addNewNodeToVolume:
-    - cmd[${nodes.storage.master.id}]: |-
+    - cmd[${globals.storage_master_node_id}]: |-
         let "NUMBER_OF_BRICKS=$(gluster peer status |grep 'Number of Peers'|awk '{print $4}') + 1"; 
         gluster volume add-brick jelastic replica ${NUMBER_OF_BRICKS} ${this.address}:/glustervolume force
       user: root
@@ -162,7 +172,7 @@ actions:
         gluster volume status;
         
   removeBrickFromVolume:
-    - cmd[${nodes.storage.master.id}]: |-
+    - cmd[${globals.storage_master_node_address}]: |-
         NUMBER_OF_BRICKS=$(gluster peer status |grep 'Number of Peers'|awk '{print $4}'); 
         yes 2>/dev/null | gluster volume remove-brick jelastic replica ${NUMBER_OF_BRICKS} ${this.address}:/glustervolume force; 
         gluster peer detach ${this.address} && sleep 1;
